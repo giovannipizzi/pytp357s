@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+*.db
+devices.yaml
+*~
+.DS_Store

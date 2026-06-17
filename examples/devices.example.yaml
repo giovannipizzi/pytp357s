@@ -1,0 +1,35 @@
+# Example configuration for pytp357s.
+#
+# Copy this file to ./devices.yaml (or ~/.config/pytp357s/devices.yaml)
+# and replace the MAC addresses with your own devices' addresses.
+#
+# To find your devices' MAC addresses, run a BLE scan, e.g.:
+#
+#   python -c "from bleak import BleakScanner; import asyncio; \
+#              print(asyncio.run(BleakScanner.discover(timeout=5)))"
+#
+# Look for entries named "TP357S (XXXX)".
+
+# Global defaults. All of these can be overridden per-command via CLI flags.
+defaults:
+  max_count: 20000        # records to request on a full fetch (16-bit max 65535)
+  overlap: 15              # records to re-fetch and verify in incremental mode
+  timeout: 120             # BLE response timeout in seconds
+  parallel: 2              # max simultaneous BLE connections (1 = serial)
+  interval_minutes: 1      # recording interval of the devices (currently fixed at 1 min)
+
+devices:
+  S1:
+    mac: "AA:BB:CC:11:22:33"
+    name: "Sensor Kitchen"
+    room: "Kitchen"
+
+  S2:
+    mac: "AA:BB:CC:44:55:66"
+    name: "Sensor Bedroom"
+    room: "Bedroom"
+
+  S3:
+    mac: "AA:BB:CC:77:88:99"
+    name: "Sensor Office"
+    room: "Office"

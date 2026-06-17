@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pytp357s"
+version = "0.1.0"
+description = "Fetch and visualize history from ThermoPro TP357S BLE temperature/humidity sensors"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [
+    { name = "Giovanni Pizzi" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Home Automation",
+]
+dependencies = [
+    "bleak>=0.21",
+    "PyYAML>=6.0",
+    "matplotlib>=3.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/giovannipizzi/pytp357s"
+Repository = "https://github.com/giovannipizzi/pytp357s"
+Issues = "https://github.com/giovannipizzi/pytp357s/issues"
+
+[project.scripts]
+pytp357s = "pytp357s.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
