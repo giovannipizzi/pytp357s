@@ -28,6 +28,7 @@ BUILTIN_DEFAULTS = {
     "max_count": 20000,
     "overlap": 15,
     "timeout": 120,
+    "scan_timeout": 20,
     "parallel": 2,
     "interval_minutes": 1,
 }

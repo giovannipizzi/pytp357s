@@ -53,6 +53,7 @@ async def fetch_history(
     count: Optional[int],
     overlap: int,
     timeout: float,
+    scan_timeout: float,
     force: bool,
     interval_minutes: int,
     verbose: bool = False,
@@ -94,7 +95,7 @@ async def fetch_history(
 
     try:
         readings, fetch_time = await protocol.ble_fetch_history(
-            address, fetch_count, timeout=timeout, verbose=verbose, label=key
+            address, fetch_count, timeout=timeout, scan_timeout=scan_timeout, verbose=verbose, label=key
         )
     except Exception as e:  # noqa: BLE001
         return FetchResult(key=key, status="error", message=str(e))

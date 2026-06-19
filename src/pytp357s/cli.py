@@ -14,7 +14,7 @@ import asyncio
 import os
 import sys
 
-from . import storage
+from . import __version__, storage
 from .config import ConfigError, load_config, resolve_device
 from .fetcher import process_device
 
@@ -82,6 +82,13 @@ def _build_fetch_parser(subparsers) -> None:
         help="BLE response timeout per device (default from config)",
     )
     p.add_argument(
+        "--scan-timeout",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="BLE device discovery timeout (default from config; macOS needs ~20s)",
+    )
+    p.add_argument(
         "--parallel",
         type=int,
         default=None,
@@ -121,6 +128,7 @@ async def _run_fetch(args, cfg) -> int:
 
     overlap = args.overlap if args.overlap is not None else defaults["overlap"]
     timeout = args.timeout if args.timeout is not None else defaults["timeout"]
+    scan_timeout = args.scan_timeout if args.scan_timeout is not None else defaults["scan_timeout"]
     parallel = args.parallel if args.parallel is not None else defaults["parallel"]
     interval_minutes = defaults["interval_minutes"]
 
@@ -172,6 +180,7 @@ async def _run_fetch(args, cfg) -> int:
                 count=args.count,
                 overlap=overlap,
                 timeout=timeout,
+                scan_timeout=scan_timeout,
                 force=args.force,
                 interval_minutes=interval_minutes,
                 verbose=args.verbose,
@@ -289,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="pytp357s",
         description="Fetch and visualize history from ThermoPro TP357S BLE sensors.",
     )
+    parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     _build_fetch_parser(subparsers)

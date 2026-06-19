@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pytp357s"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Fetch and visualize history from ThermoPro TP357S BLE temperature/humidity sensors"
 readme = "README.md"
 license = { text = "MIT" }
@@ -39,3 +39,6 @@ pytp357s = "pytp357s.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "pytp357s.__version__"}

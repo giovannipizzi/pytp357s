@@ -203,6 +203,7 @@ async def ble_fetch_history(
     address: str,
     count: int,
     timeout: float = 120,
+    scan_timeout: float = 20,
     verbose: bool = False,
     label: str = "",
 ) -> tuple[list[tuple[float, int]], datetime.datetime]:
@@ -219,7 +220,7 @@ async def ble_fetch_history(
     """
     prefix = f"[{label}] " if label else ""
 
-    dev = await find_device(address)
+    dev = await find_device(address, scan_timeout=scan_timeout)
     if not dev:
         raise RuntimeError("Device not found (not in range?)")
 
@@ -236,8 +237,6 @@ async def ble_fetch_history(
         if chunks and chunks[-1][-2:] == b"\x66\x66":
             done.set()
 
-    fetch_time = datetime.datetime.now().replace(second=0, microsecond=0)
-
     async with BleakClient(dev, timeout=20) as client:
         if verbose:
             print(f"{prefix}Connected. Sending datetime sync...")
@@ -247,7 +246,13 @@ async def ble_fetch_history(
         await client.start_notify(UUID_NOTIFY, on_notify)
         if verbose:
             print(f"{prefix}Requesting {count} records...")
-        for cmd in make_history_cmds(count):
+
+        # Capture fetch_time here — after connection and sleep — so it matches
+        # the datetime embedded in the history command, avoiding a minute-boundary
+        # skew that would shift all assigned timestamps by 1 minute.
+        now = datetime.datetime.now()
+        fetch_time = now.replace(second=0, microsecond=0)
+        for cmd in make_history_cmds(count, now=now):
             await client.write_gatt_char(UUID_WRITE, cmd, response=False)
             await asyncio.sleep(0.2)
 
