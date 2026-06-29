@@ -3,6 +3,7 @@ Command-line interface for pytp357s.
 
 Subcommands:
   fetch-data    Fetch live readings or history from one or more devices
+  scan-devices  Scan for BLE devices and report what's visible
   update-rooms  Sync device metadata (mac/name/room) from config into the DB
   plot          Plot temperature/humidity from a SQLite database
 """
@@ -13,6 +14,7 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 
 from . import __version__, storage
 from .config import ConfigError, load_config, resolve_device
@@ -216,6 +218,150 @@ def _cmd_fetch_data(args) -> int:
     return asyncio.run(_run_fetch(args, cfg))
 
 
+# ── scan-devices ─────────────────────────────────────────────────────────────
+
+
+def _build_scan_parser(subparsers) -> None:
+    p = subparsers.add_parser(
+        "scan-devices",
+        help="Scan for BLE devices and report what's visible",
+        description=(
+            "Scan the BLE environment and report which devices are visible,\n"
+            "along with their internal name (if configured), MAC address,\n"
+            "Bluetooth advertisement name, and how long they took to appear.\n\n"
+            "Without --all, one or more DEVICE arguments are required so the\n"
+            "scan knows what to look for.\n\n"
+            "With --all, DEVICE is optional: every BLE device found during the\n"
+            "scan is reported, and those matching configured devices are labelled\n"
+            "with their internal name (e.g. T1, T2)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "devices",
+        nargs="*",
+        metavar="DEVICE",
+        help="Device key, name, or MAC to scan for (optional with --all)",
+    )
+    p.add_argument("--config", metavar="FILE", help="Path to devices.yaml")
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help="Report all visible BLE devices, not only configured ones",
+    )
+    p.add_argument(
+        "--scan-timeout",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="How long to scan in seconds (default from config or 20s)",
+    )
+    p.set_defaults(_handler=_cmd_scan_devices)
+
+
+async def _run_scan(args, cfg) -> int:
+    from bleak import BleakScanner
+    from .protocol import mac_to_name_suffix
+
+    defaults = cfg.get("defaults", {})
+    devices_cfg = cfg.get("devices", {})
+    scan_timeout = (
+        args.scan_timeout if args.scan_timeout is not None
+        else defaults.get("scan_timeout", 20)
+    )
+
+    # Resolve requested devices from positional args
+    selected: dict[str, dict] = {}
+    unknown: list[str] = []
+    for arg in (args.devices or []):
+        key, device = resolve_device(devices_cfg, arg)
+        if device:
+            selected[key] = device
+        else:
+            unknown.append(arg)
+
+    if unknown:
+        print(f"Warning: unknown device(s) ignored: {', '.join(unknown)}", file=sys.stderr)
+
+    if not args.all and not selected:
+        print("Error: specify at least one device or use --all.", file=sys.stderr)
+        return 1
+
+    # Lookup structures for matching scan results to known devices
+    known_by_addr = {dev["mac"].upper(): key for key, dev in selected.items()}
+    suffix_to_key = {mac_to_name_suffix(dev["mac"]): key for key, dev in selected.items()}
+
+    print(f"Scanning for {scan_timeout:.0f}s...")
+    print()
+
+    start = time.monotonic()
+    seen: dict[str, dict] = {}  # address -> {key, bt_name, elapsed}
+
+    def callback(device, _adv_data) -> None:
+        addr = device.address.upper()
+        if addr in seen:
+            return
+        elapsed = time.monotonic() - start
+        key = known_by_addr.get(addr)
+        if key is None and device.name:
+            if device.name.startswith("TP357S (") and device.name.endswith(")"):
+                key = suffix_to_key.get(device.name[8:-1])
+        if key is not None or args.all:
+            seen[addr] = {"key": key, "bt_name": device.name, "elapsed": elapsed}
+
+    async with BleakScanner(callback):
+        await asyncio.sleep(scan_timeout)
+
+    if not seen:
+        print("No devices found.")
+        return 0
+
+    # Sort: known devices in config order, then unknown alphabetically by address
+    config_order = list(devices_cfg.keys())
+
+    def _sort_key(item):
+        addr, info = item
+        k = info["key"]
+        if k and k in config_order:
+            return (0, config_order.index(k), addr)
+        return (1, 0, addr)
+
+    rows = sorted(seen.items(), key=_sort_key)
+
+    label_w = max((len(f"[{info['key']}]") if info["key"] else 0 for _, info in rows), default=0)
+    addr_w = max(len(addr) for addr, _ in rows)
+    name_w = max((len(info["bt_name"] or "") for _, info in rows), default=0)
+
+    for addr, info in rows:
+        label = f"[{info['key']}]" if info["key"] else ""
+        bt_name = info["bt_name"] or ""
+        print(f"  {label:<{label_w}}  {addr:<{addr_w}}  {bt_name:<{name_w}}  {info['elapsed']:5.1f}s")
+
+    print()
+    n_known = sum(1 for _, info in rows if info["key"] is not None)
+    n_unknown = len(rows) - n_known
+    parts = []
+    if selected:
+        parts.append(f"{n_known}/{len(selected)} configured device(s) found")
+    if args.all and n_unknown:
+        parts.append(f"{n_unknown} other BLE device(s) visible")
+    if parts:
+        print(", ".join(parts) + ".")
+
+    return 0
+
+
+def _cmd_scan_devices(args) -> int:
+    try:
+        cfg = load_config(args.config)
+    except ConfigError:
+        if args.all:
+            cfg = {"defaults": {}, "devices": {}}
+        else:
+            raise
+    return asyncio.run(_run_scan(args, cfg))
+
+
 # ── update-rooms ──────────────────────────────────────────────────────────────
 
 
@@ -293,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     _build_fetch_parser(subparsers)
+    _build_scan_parser(subparsers)
     _build_update_rooms_parser(subparsers)
     _build_plot_parser(subparsers)
 
