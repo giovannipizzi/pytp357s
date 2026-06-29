@@ -9,13 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-import sys
 
 from bleak import BleakClient, BleakScanner
 
 # ── BLE characteristic UUIDs ────────────────────────────────────────────────
-# These are fixed by the TP357S firmware and identical across all units.
-
 UUID_NOTIFY = "00010203-0405-0607-0809-0a0b0c0d2b10"
 UUID_WRITE = "00010203-0405-0607-0809-0a0b0c0d2b11"
 
@@ -37,55 +34,53 @@ def mac_to_name_suffix(mac: str) -> str:
     return "".join(parts[-2:])
 
 
-async def find_device(address: str, scan_timeout: float = 20):
+async def find_devices(addresses: list[str], scan_timeout: float = 20) -> dict[str, object]:
     """
-    Find a TP357S device by MAC address, with early-exit scanning and
-    a platform-appropriate strategy.
+    Scan for multiple TP357S devices simultaneously.
 
-    On Linux/Windows:
-      1. Try BleakScanner.find_device_by_address() with a short timeout
-         (3s) to exploit BlueZ's warm device cache — returns instantly
-         if the device was recently seen.
-      2. If that misses, run an early-exit callback scan matching by
-         address OR name suffix, returning as soon as either matches.
+    Runs a single BLE scan and matches each discovered device against the
+    requested addresses by MAC address (Linux/Windows) or TP357S name suffix
+    (all platforms, required on macOS where CoreBluetooth replaces MACs with
+    UUIDs). Returns as soon as all requested devices are found, or after
+    scan_timeout seconds.
 
-    On macOS:
-      Skip find_device_by_address() entirely (CoreBluetooth never
-      matches real MACs). Run the early-exit callback scan matching
-      by name suffix only.
-
-    The early-exit scan stops as soon as the target is found, rather
-    than waiting for the full scan_timeout.
+    Returns a dict mapping uppercase MAC address to the discovered BLEDevice.
+    Addresses not found within the timeout are absent from the result.
     """
-    suffix = mac_to_name_suffix(address)
-    expected_name = f"TP357S ({suffix})"
-    address_upper = address.upper()
+    addresses_upper = {a.upper() for a in addresses}
+    suffix_to_addr = {mac_to_name_suffix(a): a.upper() for a in addresses}
 
-    # Fast path: BlueZ warm cache (Linux/Windows only, short timeout)
-    if sys.platform != "darwin":
-        dev = await BleakScanner.find_device_by_address(address, timeout=3)
-        if dev:
-            return dev
+    found: dict[str, object] = {}
+    all_found = asyncio.Event()
 
-    # Early-exit callback scan (all platforms)
-    found = asyncio.Event()
-    result: list = []
-
-    def callback(device, advertisement_data):
-        if found.is_set():
+    def callback(device, _advertisement_data) -> None:
+        if all_found.is_set():
             return
-        if (device.address.upper() == address_upper or
-                device.name == expected_name):
-            result.append(device)
-            found.set()
+        addr = device.address.upper()
+        matched: str | None = None
+        if addr in addresses_upper:
+            matched = addr
+        elif (
+            device.name
+            and device.name.startswith("TP357S (")
+            and device.name.endswith(")")
+        ):
+            suffix = device.name[8:-1]
+            if suffix in suffix_to_addr:
+                matched = suffix_to_addr[suffix]
+        if matched and matched not in found:
+            found[matched] = device
+            if len(found) == len(addresses_upper):
+                all_found.set()
 
-    async with BleakScanner(callback) as scanner:
+    async with BleakScanner(callback):
         try:
-            await asyncio.wait_for(found.wait(), timeout=scan_timeout)
+            await asyncio.wait_for(all_found.wait(), timeout=scan_timeout)
         except asyncio.TimeoutError:
             pass
 
-    return result[0] if result else None
+    return found
+
 
 # ── Command builders ─────────────────────────────────────────────────────────
 
@@ -214,82 +209,135 @@ def assign_timestamps(
 
 
 async def ble_fetch_history(
-    address: str,
-    count: int,
+    devices_info: list[dict],
+    count: int | None,
+    last_ts_map: dict[str, datetime.datetime | None],
+    overlap: int,
+    interval_minutes: int,
+    parallelism: int = 1,
     timeout: float = 120,
     scan_timeout: float = 20,
     verbose: bool = False,
-    label: str = "",
-) -> tuple[list[tuple[float, int]], datetime.datetime]:
+) -> dict[str, tuple[list[tuple[float, int]], datetime.datetime] | BaseException]:
     """
-    Connect to a TP357S device, perform the datetime-sync handshake, and
-    request up to ``count`` history records.
+    Scan for and fetch history from multiple TP357S devices in parallel.
+
+    Runs a single BLE scan for all requested addresses, then connects to each
+    found device concurrently (up to ``parallelism`` simultaneous connections,
+    enforced by a semaphore placed around BleakClient). The fetch count is
+    computed inside the established connection, right before the first BLE
+    write, so the elapsed-time calculation reflects the actual protocol start.
+
+    Args:
+        devices_info: list of dicts with keys ``address`` and ``label``.
+        count: explicit record count override (None = derive from last_ts).
+        last_ts_map: per-device last stored timestamp, keyed by uppercase address.
+        overlap: extra records beyond elapsed time, for overlap verification.
+        interval_minutes: device recording interval.
+        parallelism: max simultaneous BLE connections.
+        timeout: per-device BLE response timeout in seconds.
+        scan_timeout: BLE discovery timeout in seconds.
+        verbose: print per-device progress lines.
 
     Returns:
-        (readings, fetch_time) — readings is most-recent-first.
-
-    Raises:
-        RuntimeError if the device cannot be found, the response times out,
-        or no valid readings are decoded.
+        Dict mapping uppercase address to (readings, fetch_time) or an Exception.
     """
-    prefix = f"[{label}] " if label else ""
+    addresses = [d["address"].upper() for d in devices_info]
+    label_map = {d["address"].upper(): d.get("label", d["address"]) for d in devices_info}
 
-    dev = await find_device(address, scan_timeout=scan_timeout)
-    if not dev:
-        raise RuntimeError("Device not found (not in range?)")
+    if verbose:
+        print(f"Scanning for {len(addresses)} device(s)...")
 
-    chunks: list[bytes] = []
-    done = asyncio.Event()
+    found_devices = await find_devices([d["address"] for d in devices_info], scan_timeout=scan_timeout)
 
-    def on_notify(_sender, data):
-        d = bytes(data)
-        if d[:2] == b"\xcc\xcc":
-            chunks.clear()
-            chunks.append(d)
-        elif chunks:
-            chunks.append(d)
-        if chunks and chunks[-1][-2:] == b"\x66\x66":
-            done.set()
+    if verbose:
+        missing = [a for a in addresses if a not in found_devices]
+        if missing:
+            print(f"Found {len(found_devices)}/{len(addresses)}; not in range: {', '.join(missing)}")
+        else:
+            print(f"All {len(addresses)} device(s) found.")
 
-    async with BleakClient(dev, timeout=20) as client:
-        if verbose:
-            print(f"{prefix}Connected. Sending datetime sync...")
-        await client.write_gatt_char(UUID_WRITE, make_datetime_cmd(), response=False)
-        await asyncio.sleep(1)
+    semaphore = asyncio.Semaphore(parallelism)
+    results: dict[str, tuple | BaseException] = {}
 
-        await client.start_notify(UUID_NOTIFY, on_notify)
-        if verbose:
-            print(f"{prefix}Requesting {count} records...")
+    async def _connect_and_fetch(address: str) -> None:
+        label = label_map.get(address, address)
+        prefix = f"[{label}] " if label else ""
+        dev = found_devices.get(address)
+        if dev is None:
+            results[address] = RuntimeError("Device not found (not in range?)")
+            return
 
-        # Capture fetch_time here — after connection and sleep — so it matches
-        # the datetime embedded in the history command, avoiding a minute-boundary
-        # skew that would shift all assigned timestamps by 1 minute.
-        now = datetime.datetime.now()
-        fetch_time = now.replace(second=0, microsecond=0)
-        for cmd in make_history_cmds(count, now=now):
-            await client.write_gatt_char(UUID_WRITE, cmd, response=False)
-            await asyncio.sleep(0.2)
+        chunks: list[bytes] = []
+        done = asyncio.Event()
+
+        def on_notify(_sender, data: bytearray) -> None:
+            d = bytes(data)
+            if d[:2] == b"\xcc\xcc":
+                chunks.clear()
+                chunks.append(d)
+            elif chunks:
+                chunks.append(d)
+            if chunks and chunks[-1][-2:] == b"\x66\x66":
+                done.set()
 
         try:
-            await asyncio.wait_for(done.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            raise RuntimeError(
-                f"Response timed out after {timeout}s "
-                f"({len(chunks)} chunks received). "
-                f"Try a larger --timeout."
-            )
-        finally:
-            await client.stop_notify(UUID_NOTIFY)
+            async with semaphore:
+                async with BleakClient(dev, timeout=20) as client:
+                    if verbose:
+                        print(f"{prefix}Connected. Sending datetime sync...")
+                    await client.write_gatt_char(UUID_WRITE, make_datetime_cmd(), response=False)
+                    await asyncio.sleep(1)
 
-    readings = decode_history_response(chunks)
-    if not readings:
-        raise RuntimeError("Response received but contained no valid readings.")
-    if verbose:
-        print(f"{prefix}Received {len(readings)} records.")
-    return readings, fetch_time
+                    await client.start_notify(UUID_NOTIFY, on_notify)
+
+                    # Compute fetch count now, inside the established connection,
+                    # so `now` accurately reflects the start of the protocol exchange.
+                    now = datetime.datetime.now()
+                    fetch_time = now.replace(second=0, microsecond=0)
+                    last_ts = last_ts_map.get(address)
+                    if count is not None:
+                        fetch_count = count
+                    elif last_ts is not None:
+                        elapsed = max(1, int((fetch_time - last_ts).total_seconds() / 60 / interval_minutes))
+                        fetch_count = elapsed + overlap
+                    else:
+                        fetch_count = 20000
+
+                    if verbose:
+                        print(f"{prefix}Requesting {fetch_count} records...")
+
+                    for cmd in make_history_cmds(fetch_count, now=now):
+                        await client.write_gatt_char(UUID_WRITE, cmd, response=False)
+                        await asyncio.sleep(0.2)
+
+                    try:
+                        await asyncio.wait_for(done.wait(), timeout=timeout)
+                    except asyncio.TimeoutError:
+                        raise RuntimeError(
+                            f"Response timed out after {timeout}s "
+                            f"({len(chunks)} chunks received). "
+                            f"Try a larger --timeout."
+                        )
+                    finally:
+                        await client.stop_notify(UUID_NOTIFY)
+
+            readings = decode_history_response(chunks)
+            if not readings:
+                raise RuntimeError("Response received but contained no valid readings.")
+            if verbose:
+                print(f"{prefix}Received {len(readings)} records.")
+            results[address] = (readings, fetch_time)
+        except Exception as e:  # noqa: BLE001
+            results[address] = e
+
+    tasks = [asyncio.create_task(_connect_and_fetch(addr)) for addr in addresses]
+    await asyncio.gather(*tasks)
+
+    return results
 
 
-async def ble_fetch_live(address: str, timeout: float = 10) -> tuple[float, int]:
+async def ble_fetch_live(address: str, timeout: float = 10, scan_timeout: float = 20) -> tuple[float, int]:
     """
     Connect to a TP357S device and fetch a single live reading.
 
@@ -302,13 +350,14 @@ async def ble_fetch_live(address: str, timeout: float = 10) -> tuple[float, int]
     received: list[bytes] = []
     done = asyncio.Event()
 
-    def on_notify(_sender, data):
+    def on_notify(_sender, data: bytearray) -> None:
         d = bytes(data)
         if d[0] == 0xC2 and len(d) >= 6:
             received.append(d)
             done.set()
 
-    dev = await find_device(address)
+    found = await find_devices([address], scan_timeout=scan_timeout)
+    dev = found.get(address.upper())
     if not dev:
         raise RuntimeError("Device not found (not in range?)")
 

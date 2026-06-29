@@ -45,6 +45,7 @@ defaults:
   max_count: 20000
   overlap: 15
   timeout: 120
+  scan_timeout: 20        # BLE discovery timeout (macOS needs ~20s)
   parallel: 2
   interval_minutes: 1 # do not change
 
@@ -170,6 +171,7 @@ pytp357s plot --db sensors.db --hours 24
 import asyncio
 from pytp357s import protocol, storage
 from pytp357s.config import load_config
+from pytp357s.fetcher import process_devices
 
 cfg = load_config("devices.yaml")
 device = cfg["devices"]["S1"]
@@ -178,19 +180,29 @@ device = cfg["devices"]["S1"]
 temp, hum = asyncio.run(protocol.ble_fetch_live(device["mac"]))
 print(f"{temp:.1f} C, {hum}%")
 
-# Full history
-readings, fetch_time = asyncio.run(
-    protocol.ble_fetch_history(device["mac"], count=20000)
-)
-timestamped = protocol.assign_timestamps(readings, fetch_time)
+# Full history for one or more devices (recommended high-level API)
+results = asyncio.run(process_devices(
+    devices={"S1": device},
+    live=False,
+    db_path=None,
+    incremental=False,
+    count=20000,
+    overlap=0,
+    timeout=120,
+    scan_timeout=20,
+    parallelism=1,
+    force=False,
+    interval_minutes=1,
+))
+timestamped = results["S1"].data  # list of (datetime, temp, hum)
 
 # Store it
 storage.init_db("sensors.db")
 storage.append("sensors.db", "S1", timestamped)
 ```
 
-For the higher-level fetch pipeline (incremental logic, overlap/gap
-verification), see `pytp357s.fetcher.fetch_history()`.
+For the full fetch pipeline (incremental logic, overlap/gap verification),
+see `pytp357s.fetcher.process_devices()`.
 
 ## Scanning devices
 This is useful to see how many devices are in range. Note that this can

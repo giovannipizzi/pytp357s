@@ -16,7 +16,7 @@ import sys
 
 from . import __version__, storage
 from .config import ConfigError, load_config, resolve_device
-from .fetcher import process_device
+from .fetcher import process_devices
 
 
 # ── fetch-data ────────────────────────────────────────────────────────────────
@@ -167,34 +167,25 @@ async def _run_fetch(args, cfg) -> int:
     )
     print()
 
-    semaphore = asyncio.Semaphore(parallelism)
-    tasks = [
-        asyncio.create_task(
-            process_device(
-                key,
-                dev,
-                semaphore,
-                live=args.live,
-                db_path=args.db,
-                incremental=args.incremental,
-                count=args.count,
-                overlap=overlap,
-                timeout=timeout,
-                scan_timeout=scan_timeout,
-                force=args.force,
-                interval_minutes=interval_minutes,
-                verbose=args.verbose,
-                debug_overlap=args.debug_overlap,
-            ),
-            name=key,
-        )
-        for key, dev in selected.items()
-    ]
-    results = await asyncio.gather(*tasks)
+    results_dict = await process_devices(
+        devices=selected,
+        live=args.live,
+        db_path=args.db,
+        incremental=args.incremental,
+        count=args.count,
+        overlap=overlap,
+        timeout=timeout,
+        scan_timeout=scan_timeout,
+        parallelism=parallelism,
+        force=args.force,
+        interval_minutes=interval_minutes,
+        verbose=args.verbose,
+        debug_overlap=args.debug_overlap,
+    )
 
     ok = warn = fail = 0
-    for result in results:
-        label = f"{result.key} ({selected[result.key].get('name', result.key)})"
+    for key, result in results_dict.items():
+        label = f"{key} ({selected[key].get('name', key)})"
         icon = {"ok": "\u2713", "warning": "\u26a0", "error": "\u2717"}[result.status]
         print(f"  {icon}  {label}: {result.message}")
         if result.status == "ok" and result.data is not None and not args.db and not args.live:

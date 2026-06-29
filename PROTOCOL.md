@@ -321,7 +321,7 @@ even though an interactive `adb shell` cannot.
   randomized UUID instead (e.g. `5A641DE0-533F-...`), which differs between
   scans and between machines. `pytp357s` works around this by falling back
   to scanning for the advertised name `TP357S (XXXX)`, where `XXXX` is the
-  last two bytes of the configured MAC (see `protocol.find_device()` and
+  last two bytes of the configured MAC (see `protocol.find_devices()` and
   `protocol.mac_to_name_suffix()`). This means the same `devices.yaml` with
   real MAC addresses works on both Linux/BlueZ (direct address match) and
   macOS (name-suffix fallback), at the cost of a slower discovery scan
@@ -330,5 +330,5 @@ even though an interactive `adb shell` cannot.
   is extremely unlikely in practice, but we aware of this issue.
 - **macOS BLE advertisement visibility.** Individual devices may not appear
   in every scan window -- a 10-second scan can miss devices that a
-  20-second scan finds. `find_device()` defaults to a 20-second fallback
+  20-second scan finds. `find_devices()` defaults to a 20-second fallback
   scan for this reason.

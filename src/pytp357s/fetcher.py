@@ -1,6 +1,7 @@
 """
-Per-device fetch pipeline: connects over BLE, fetches readings, verifies
-overlap and continuity against existing storage, and writes results.
+Multi-device fetch pipeline: scans over BLE, fetches readings for all
+requested devices in parallel, verifies overlap and continuity against
+existing storage, and writes results.
 
 This module contains no CLI/argparse code so it can be used directly from
 Python. See ``cli.py`` for the command-line interface.
@@ -29,78 +30,34 @@ class FetchResult:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
-async def fetch_live(key: str, device: dict[str, Any]) -> FetchResult:
+async def fetch_live(key: str, device: dict[str, Any], scan_timeout: float = 20) -> FetchResult:
     """Fetch a single live reading from a device."""
     address = device["mac"]
     try:
-        temp, hum = await protocol.ble_fetch_live(address)
+        temp, hum = await protocol.ble_fetch_live(address, scan_timeout=scan_timeout)
         ts = datetime.datetime.now().strftime(TS_FORMAT)
         return FetchResult(
             key=key,
             status="ok",
-            message=f"{temp:.1f}\u00b0C  {hum}%  ({ts})",
+            message=f"{temp:.1f}°C  {hum}%  ({ts})",
             extra={"temp": temp, "hum": hum},
-        )
-    except Exception as e:  # noqa: BLE001 - report any BLE error per-device
-        return FetchResult(key=key, status="error", message=str(e))
-
-
-async def fetch_history(
-    key: str,
-    device: dict[str, Any],
-    db_path: Optional[str],
-    incremental: bool,
-    count: Optional[int],
-    overlap: int,
-    timeout: float,
-    scan_timeout: float,
-    force: bool,
-    interval_minutes: int,
-    verbose: bool = False,
-    debug_overlap: bool = False,
-) -> FetchResult:
-    """
-    Fetch history for one device and optionally write it to ``db_path``.
-
-    If ``db_path`` is None, the fetched readings are returned in
-    ``FetchResult.data`` and nothing is written.
-
-    If ``incremental`` is True, only records newer than the last stored
-    timestamp are appended, with ``overlap`` records re-fetched and
-    compared against storage to detect clock drift, mismatches, or gaps.
-
-    ``force`` controls behaviour when mismatches or gaps are detected:
-    if False, the device is reported as an error/warning and nothing is
-    written; if True, data is written anyway (with a GAP marker row if
-    a gap was detected).
-    """
-    address = device["mac"]
-
-    new_only_from = None
-    fetch_count = count or 20000
-
-    if incremental:
-        if db_path is None:
-            return FetchResult(
-                key=key,
-                status="error",
-                message="--incremental requires --db.",
-            )
-        last_ts = storage.last_timestamp(db_path, key)
-        if last_ts is not None:
-            now = datetime.datetime.now().replace(second=0, microsecond=0)
-            elapsed = max(1, int((now - last_ts).total_seconds() / 60 / interval_minutes))
-            fetch_count = (count if count is not None else elapsed) + overlap
-            new_only_from = last_ts
-
-    try:
-        readings, fetch_time = await protocol.ble_fetch_history(
-            address, fetch_count, timeout=timeout, scan_timeout=scan_timeout, verbose=verbose, label=key
         )
     except Exception as e:  # noqa: BLE001
         return FetchResult(key=key, status="error", message=str(e))
 
-    timestamped = protocol.assign_timestamps(readings, fetch_time, interval_minutes)
+
+def _post_process_history(
+    key: str,
+    timestamped: list[tuple[datetime.datetime, float, int]],
+    new_only_from: Optional[datetime.datetime],
+    db_path: Optional[str],
+    incremental: bool,
+    force: bool,
+    overlap: int,
+    interval_minutes: int,
+    debug_overlap: bool,
+) -> FetchResult:
+    """Verify overlap, detect gaps, write to storage, and return a FetchResult."""
 
     # ── No storage: just return the data ────────────────────────────────────
     if db_path is None:
@@ -111,7 +68,7 @@ async def fetch_history(
             status="ok",
             message=(
                 f"{len(timestamped)} records  "
-                f"[{oldest.strftime(TS_FORMAT)} \u2192 {newest.strftime(TS_FORMAT)}, "
+                f"[{oldest.strftime(TS_FORMAT)} → {newest.strftime(TS_FORMAT)}, "
                 f"span {int(span.total_seconds() // 3600)}h "
                 f"{int((span.total_seconds() % 3600) // 60)}m]"
             ),
@@ -131,18 +88,15 @@ async def fetch_history(
             status="ok",
             message=(
                 f"{len(timestamped)} records written  "
-                f"[{oldest.strftime(TS_FORMAT)} \u2192 {newest.strftime(TS_FORMAT)}, "
+                f"[{oldest.strftime(TS_FORMAT)} → {newest.strftime(TS_FORMAT)}, "
                 f"span {int(span.total_seconds() // 3600)}h "
                 f"{int((span.total_seconds() % 3600) // 60)}m]"
             ),
             data=timestamped,
         )
 
-    # ── Incremental write with overlap/gap verification ──────────────────────
-    assert new_only_from is not None or storage.last_timestamp(db_path, key) is None
-
+    # ── Incremental: first ever fetch for this device ────────────────────────
     if new_only_from is None:
-        # First-ever fetch for this device into this DB
         try:
             storage.append(db_path, key, timestamped)
         except Exception as e:  # noqa: BLE001
@@ -154,19 +108,19 @@ async def fetch_history(
             status="ok",
             message=(
                 f"{len(timestamped)} records written (first fetch)  "
-                f"[{oldest.strftime(TS_FORMAT)} \u2192 {newest.strftime(TS_FORMAT)}, "
+                f"[{oldest.strftime(TS_FORMAT)} → {newest.strftime(TS_FORMAT)}, "
                 f"span {int(span.total_seconds() // 3600)}h "
                 f"{int((span.total_seconds() % 3600) // 60)}m]"
             ),
             data=timestamped,
         )
 
+    # ── Incremental: overlap/gap verification ────────────────────────────────
     stored_tail = storage.tail(db_path, key, overlap)
     new_rows = [(ts, t, h) for ts, t, h in timestamped if ts > new_only_from]
     mismatches: list[str] = []
     gap_warning: Optional[str] = None
 
-    # Gap detection
     oldest_fetched = timestamped[0][0]
     gap_minutes = int(
         (oldest_fetched - new_only_from).total_seconds() / 60 / interval_minutes
@@ -206,13 +160,13 @@ async def fetch_history(
             if match_ts is None:
                 mismatches.append(
                     f"{sts.strftime(TS_FORMAT)}: not found in fetch "
-                    f"(checked \u00b11 interval)"
+                    f"(checked ±1 interval)"
                 )
                 if debug_overlap:
-                    dash = "\u2014"
+                    dash = "—"
                     print(
                         f"  {sts.strftime(TS_FORMAT):<22} "
-                        f"{stemp:>6.1f}\u00b0C {shum:>3}%  "
+                        f"{stemp:>6.1f}°C {shum:>3}%  "
                         f"{dash:<22} {dash:>12}  {'MISSING':>8}"
                     )
                 continue
@@ -223,24 +177,24 @@ async def fetch_history(
             if abs(ft - stemp) > 0.15 or abs(fh - shum) > 1:
                 mismatches.append(
                     f"{sts.strftime(TS_FORMAT)}: "
-                    f"stored={stemp:.1f}\u00b0C/{shum}% "
-                    f"fetch={ft:.1f}\u00b0C/{fh}% {offset_str}"
+                    f"stored={stemp:.1f}°C/{shum}% "
+                    f"fetch={ft:.1f}°C/{fh}% {offset_str}"
                 )
                 if debug_overlap:
                     print(
                         f"  {sts.strftime(TS_FORMAT):<22} "
-                        f"{stemp:>6.1f}\u00b0C {shum:>3}%  "
+                        f"{stemp:>6.1f}°C {shum:>3}%  "
                         f"{match_ts.strftime(TS_FORMAT):<22} "
-                        f"{ft:>6.1f}\u00b0C {fh:>3}%  "
+                        f"{ft:>6.1f}°C {fh:>3}%  "
                         f"{'MISMATCH':>8} {offset_str}"
                     )
             else:
                 if debug_overlap:
                     print(
                         f"  {sts.strftime(TS_FORMAT):<22} "
-                        f"{stemp:>6.1f}\u00b0C {shum:>3}%  "
+                        f"{stemp:>6.1f}°C {shum:>3}%  "
                         f"{match_ts.strftime(TS_FORMAT):<22} "
-                        f"{ft:>6.1f}\u00b0C {fh:>3}%  "
+                        f"{ft:>6.1f}°C {fh:>3}%  "
                         f"{'OK':>8} {offset_str}"
                     )
         if debug_overlap:
@@ -250,14 +204,14 @@ async def fetch_history(
     if mismatches:
         detail = "; ".join(mismatches[:3])
         if len(mismatches) > 3:
-            detail += f" \u2026 (+{len(mismatches) - 3} more)"
+            detail += f" … (+{len(mismatches) - 3} more)"
         if not force:
             return FetchResult(
                 key=key,
                 status="error",
                 message=(
                     f"{len(mismatches)}/{len(stored_tail)} overlap records "
-                    f"mismatched \u2014 NOT writing to protect data integrity. "
+                    f"mismatched — NOT writing to protect data integrity. "
                     f"Details: {detail}. Re-run with --force to append anyway, "
                     f"or delete storage to start fresh."
                 ),
@@ -284,7 +238,7 @@ async def fetch_history(
                 status="warning",
                 message=(
                     gap_warning
-                    + " \u2014 NOT writing to avoid gap. Re-run with --force "
+                    + " — NOT writing to avoid gap. Re-run with --force "
                     "to write with a GAP marker inserted."
                 ),
             )
@@ -310,7 +264,7 @@ async def fetch_history(
             return FetchResult(key=key, status="error", message=f"Write failed: {e}")
 
     verified = (
-        f"overlap {len(stored_tail)}/{overlap} verified \u2713"
+        f"overlap {len(stored_tail)}/{overlap} verified ✓"
         if stored_tail
         else "no overlap (first run)"
     )
@@ -319,21 +273,105 @@ async def fetch_history(
         status="ok",
         message=(
             f"{len(new_rows)} new records written  ({verified})  "
-            f"[{timestamped[0][0].strftime(TS_FORMAT)} \u2192 "
+            f"[{timestamped[0][0].strftime(TS_FORMAT)} → "
             f"{timestamped[-1][0].strftime(TS_FORMAT)}]"
         ),
         data=new_rows,
     )
 
 
-async def process_device(
-    key: str,
-    device: dict[str, Any],
-    semaphore: asyncio.Semaphore,
-    **kwargs: Any,
-) -> FetchResult:
-    """Wrapper that applies a concurrency-limiting semaphore around fetch_*."""
-    async with semaphore:
-        if kwargs.pop("live", False):
-            return await fetch_live(key, device)
-        return await fetch_history(key, device, **kwargs)
+async def process_devices(
+    devices: dict[str, dict[str, Any]],
+    live: bool,
+    db_path: Optional[str],
+    incremental: bool,
+    count: Optional[int],
+    overlap: int,
+    timeout: float,
+    scan_timeout: float,
+    parallelism: int,
+    force: bool,
+    interval_minutes: int,
+    verbose: bool = False,
+    debug_overlap: bool = False,
+) -> dict[str, FetchResult]:
+    """
+    Fetch data from all requested devices, returning a FetchResult per device key.
+
+    For live readings: each device is queried independently in parallel (up to
+    ``parallelism`` simultaneous connections via an internal semaphore).
+
+    For history: a single BLE scan locates all devices, then connections are
+    established in parallel (semaphore inside ``ble_fetch_history``), and
+    results are post-processed per device.
+    """
+    if live:
+        sem = asyncio.Semaphore(parallelism)
+
+        async def _live_one(key: str, device: dict) -> FetchResult:
+            async with sem:
+                return await fetch_live(key, device, scan_timeout=scan_timeout)
+
+        results_list = await asyncio.gather(
+            *[_live_one(k, d) for k, d in devices.items()]
+        )
+        return {r.key: r for r in results_list}
+
+    # ── History fetch ────────────────────────────────────────────────────────
+
+    # Collect per-device last_ts before the BLE scan starts.
+    last_ts_map: dict[str, Optional[datetime.datetime]] = {}
+    new_only_from_map: dict[str, Optional[datetime.datetime]] = {}
+    for key, device in devices.items():
+        address = device["mac"].upper()
+        last_ts: Optional[datetime.datetime] = None
+        if incremental and db_path:
+            last_ts = storage.last_timestamp(db_path, key)
+        last_ts_map[address] = last_ts
+        new_only_from_map[key] = last_ts
+
+    devices_info = [
+        {"address": device["mac"], "label": key}
+        for key, device in devices.items()
+    ]
+
+    raw_results = await protocol.ble_fetch_history(
+        devices_info,
+        count=count,
+        last_ts_map=last_ts_map,
+        overlap=overlap,
+        interval_minutes=interval_minutes,
+        parallelism=parallelism,
+        timeout=timeout,
+        scan_timeout=scan_timeout,
+        verbose=verbose,
+    )
+
+    # Post-process each result: assign timestamps, verify overlap, write.
+    fetch_results: dict[str, FetchResult] = {}
+    for key, device in devices.items():
+        address = device["mac"].upper()
+        raw = raw_results.get(address)
+
+        if isinstance(raw, BaseException):
+            fetch_results[key] = FetchResult(key=key, status="error", message=str(raw))
+            continue
+        if raw is None:
+            fetch_results[key] = FetchResult(key=key, status="error", message="No result received.")
+            continue
+
+        readings, fetch_time = raw
+        timestamped = protocol.assign_timestamps(readings, fetch_time, interval_minutes)
+        fetch_results[key] = _post_process_history(
+            key=key,
+            timestamped=timestamped,
+            new_only_from=new_only_from_map[key],
+            db_path=db_path,
+            incremental=incremental,
+            force=force,
+            overlap=overlap,
+            interval_minutes=interval_minutes,
+            debug_overlap=debug_overlap,
+        )
+
+    return fetch_results
