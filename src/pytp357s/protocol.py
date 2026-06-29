@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import sys
 
 from bleak import BleakClient, BleakScanner
 
@@ -38,40 +39,53 @@ def mac_to_name_suffix(mac: str) -> str:
 
 async def find_device(address: str, scan_timeout: float = 20):
     """
-    Find a TP357S device by MAC address, with a fallback for platforms
-    where BLE addresses are not real MAC addresses (notably macOS, where
-    CoreBluetooth exposes a per-host randomized UUID instead).
+    Find a TP357S device by MAC address, with early-exit scanning and
+    a platform-appropriate strategy.
 
-    Strategy:
-      1. Try ``BleakScanner.find_device_by_address(address)`` directly.
-         This works on Linux/BlueZ and Windows, where the address is a
-         real MAC.
-      2. If that returns nothing, perform a full discovery scan and match
-         on the advertised name "TP357S (XXXX)", where XXXX is derived
-         from the last two bytes of ``address`` (see
-         :func:`mac_to_name_suffix`). This is the path used on macOS.
+    On Linux/Windows:
+      1. Try BleakScanner.find_device_by_address() with a short timeout
+         (3s) to exploit BlueZ's warm device cache — returns instantly
+         if the device was recently seen.
+      2. If that misses, run an early-exit callback scan matching by
+         address OR name suffix, returning as soon as either matches.
 
-    Returns a ``BLEDevice`` or ``None`` if not found by either method.
+    On macOS:
+      Skip find_device_by_address() entirely (CoreBluetooth never
+      matches real MACs). Run the early-exit callback scan matching
+      by name suffix only.
 
-    Note: on macOS, BLE advertisements are not perfectly continuous --
-    a single device may not appear in every scan window. A
-    ``scan_timeout`` of 15-20 seconds is more reliable than the bleak
-    default of 10 seconds.
+    The early-exit scan stops as soon as the target is found, rather
+    than waiting for the full scan_timeout.
     """
-    dev = await BleakScanner.find_device_by_address(address, timeout=10)
-    if dev:
-        return dev
-
-    # Fallback: scan and match by advertised name suffix (macOS)
     suffix = mac_to_name_suffix(address)
     expected_name = f"TP357S ({suffix})"
+    address_upper = address.upper()
 
-    devices = await BleakScanner.discover(timeout=scan_timeout)
-    for d in devices:
-        if d.name == expected_name:
-            return d
+    # Fast path: BlueZ warm cache (Linux/Windows only, short timeout)
+    if sys.platform != "darwin":
+        dev = await BleakScanner.find_device_by_address(address, timeout=3)
+        if dev:
+            return dev
 
-    return None
+    # Early-exit callback scan (all platforms)
+    found = asyncio.Event()
+    result: list = []
+
+    def callback(device, advertisement_data):
+        if found.is_set():
+            return
+        if (device.address.upper() == address_upper or
+                device.name == expected_name):
+            result.append(device)
+            found.set()
+
+    async with BleakScanner(callback) as scanner:
+        try:
+            await asyncio.wait_for(found.wait(), timeout=scan_timeout)
+        except asyncio.TimeoutError:
+            pass
+
+    return result[0] if result else None
 
 # ── Command builders ─────────────────────────────────────────────────────────
 
