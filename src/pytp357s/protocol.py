@@ -38,6 +38,7 @@ async def find_devices(
     addresses: list[str],
     scan_timeout: float = 20,
     verbose: bool = False,
+    labels: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """
     Scan for multiple TP357S devices simultaneously.
@@ -76,8 +77,9 @@ async def find_devices(
             found[matched] = device
             if verbose:
                 remaining = len(addresses_upper) - len(found)
+                label = labels.get(matched, matched) if labels else matched
                 missing_note = f" ({remaining} still missing)" if remaining else ""
-                print(f"  Found{missing_note}: {matched} - {device.name}")
+                print(f"  [{label}] Found{missing_note}: {matched} - {device.name}")
             if len(found) == len(addresses_upper):
                 all_found.set()
 
@@ -251,22 +253,31 @@ async def ble_fetch_history(
         Dict mapping uppercase address to (readings, fetch_time) or an Exception.
     """
     addresses = [d["address"].upper() for d in devices_info]
-    addresses_set = set(addresses)
-    suffix_to_addr = {mac_to_name_suffix(a): a for a in addresses}
     label_map = {d["address"].upper(): d.get("label", d["address"]) for d in devices_info}
 
     if verbose:
         print(f"Scanning for {len(addresses)} device(s)...")
 
+    found_devices = await find_devices([d["address"] for d in devices_info], scan_timeout=scan_timeout, verbose=verbose, labels=label_map)
+
+    if verbose:
+        missing = [a for a in addresses if a not in found_devices]
+        if missing:
+            missing_labels = [label_map.get(a, a) for a in missing]
+            print(f"Found {len(found_devices)}/{len(addresses)}; not in range: {', '.join(missing_labels)}")
+        else:
+            print(f"All {len(addresses)} device(s) found.")
+
     semaphore = asyncio.Semaphore(parallelism)
     results: dict[str, tuple | BaseException] = {}
-    connection_tasks: list[asyncio.Task] = []
-    found_set: set[str] = set()
-    all_found = asyncio.Event()
 
-    async def _connect_and_fetch(address: str, dev: object) -> None:
+    async def _connect_and_fetch(address: str) -> None:
         label = label_map.get(address, address)
         prefix = f"[{label}] " if label else ""
+        dev = found_devices.get(address)
+        if dev is None:
+            results[address] = RuntimeError("Device not found (not in range?)")
+            return
 
         chunks: list[bytes] = []
         done = asyncio.Event()
@@ -331,50 +342,8 @@ async def ble_fetch_history(
         except Exception as e:  # noqa: BLE001
             results[address] = e
 
-    def scan_callback(device, _advertisement_data) -> None:
-        if all_found.is_set():
-            return
-        addr = device.address.upper()
-        matched: str | None = None
-        if addr in addresses_set:
-            matched = addr
-        elif (
-            device.name
-            and device.name.startswith("TP357S (")
-            and device.name.endswith(")")
-        ):
-            suffix = device.name[8:-1]
-            if suffix in suffix_to_addr:
-                matched = suffix_to_addr[suffix]
-        if matched and matched not in found_set:
-            found_set.add(matched)
-            if verbose:
-                remaining = len(addresses_set) - len(found_set)
-                label = label_map.get(matched, matched)
-                missing_note = f" ({remaining} still missing)" if remaining else ""
-                print(f"  [{label}] Found{missing_note}: {matched} - {device.name}")
-            connection_tasks.append(asyncio.create_task(_connect_and_fetch(matched, device)))
-            if len(found_set) == len(addresses_set):
-                all_found.set()
-
-    async with BleakScanner(scan_callback):
-        try:
-            await asyncio.wait_for(all_found.wait(), timeout=scan_timeout)
-        except asyncio.TimeoutError:
-            pass
-
-    if verbose:
-        missing_labels = [label_map.get(a, a) for a in addresses if a not in found_set]
-        if missing_labels:
-            print(f"Found {len(found_set)}/{len(addresses)}; not in range: {', '.join(missing_labels)}")
-        else:
-            print(f"All {len(addresses)} device(s) found.")
-
-    for addr in addresses:
-        if addr not in found_set:
-            results[addr] = RuntimeError("Device not found (not in range?)")
-
-    await asyncio.gather(*connection_tasks)
+    tasks = [asyncio.create_task(_connect_and_fetch(addr)) for addr in addresses]
+    await asyncio.gather(*tasks)
 
     return results
 
