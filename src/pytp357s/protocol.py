@@ -75,7 +75,7 @@ async def find_devices(
         if matched and matched not in found:
             found[matched] = device
             if verbose:
-                remaining = len(addresses_upper) - len(found) - 1
+                remaining = len(addresses_upper) - len(found)
                 suffix_note = f" ({remaining} still missing)" if remaining else ""
                 print(f"  Found {matched} ({device.name}){suffix_note}")
             if len(found) == len(addresses_upper):
