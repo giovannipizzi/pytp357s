@@ -34,7 +34,11 @@ def mac_to_name_suffix(mac: str) -> str:
     return "".join(parts[-2:])
 
 
-async def find_devices(addresses: list[str], scan_timeout: float = 20) -> dict[str, object]:
+async def find_devices(
+    addresses: list[str],
+    scan_timeout: float = 20,
+    verbose: bool = False,
+) -> dict[str, object]:
     """
     Scan for multiple TP357S devices simultaneously.
 
@@ -70,6 +74,10 @@ async def find_devices(addresses: list[str], scan_timeout: float = 20) -> dict[s
                 matched = suffix_to_addr[suffix]
         if matched and matched not in found:
             found[matched] = device
+            if verbose:
+                remaining = len(addresses_upper) - len(found) - 1
+                suffix_note = f" ({remaining} still missing)" if remaining else ""
+                print(f"  Found {matched} ({device.name}){suffix_note}")
             if len(found) == len(addresses_upper):
                 all_found.set()
 
@@ -248,7 +256,7 @@ async def ble_fetch_history(
     if verbose:
         print(f"Scanning for {len(addresses)} device(s)...")
 
-    found_devices = await find_devices([d["address"] for d in devices_info], scan_timeout=scan_timeout)
+    found_devices = await find_devices([d["address"] for d in devices_info], scan_timeout=scan_timeout, verbose=verbose)
 
     if verbose:
         missing = [a for a in addresses if a not in found_devices]
