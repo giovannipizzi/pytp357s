@@ -38,6 +38,7 @@ async def find_devices(
     addresses: list[str],
     scan_timeout: float = 20,
     verbose: bool = False,
+    labels: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """
     Scan for multiple TP357S devices simultaneously.
@@ -76,8 +77,9 @@ async def find_devices(
             found[matched] = device
             if verbose:
                 remaining = len(addresses_upper) - len(found)
-                suffix_note = f" ({remaining} still missing)" if remaining else ""
-                print(f"  Found {matched} ({device.name}){suffix_note}")
+                label = labels.get(matched, matched) if labels else matched
+                missing_note = f" ({remaining} still missing)" if remaining else ""
+                print(f"  [{label}] Found{missing_note}: {matched} - {device.name}")
             if len(found) == len(addresses_upper):
                 all_found.set()
 
@@ -256,12 +258,13 @@ async def ble_fetch_history(
     if verbose:
         print(f"Scanning for {len(addresses)} device(s)...")
 
-    found_devices = await find_devices([d["address"] for d in devices_info], scan_timeout=scan_timeout, verbose=verbose)
+    found_devices = await find_devices([d["address"] for d in devices_info], scan_timeout=scan_timeout, verbose=verbose, labels=label_map)
 
     if verbose:
         missing = [a for a in addresses if a not in found_devices]
         if missing:
-            print(f"Found {len(found_devices)}/{len(addresses)}; not in range: {', '.join(missing)}")
+            missing_labels = [label_map.get(a, a) for a in missing]
+            print(f"Found {len(found_devices)}/{len(addresses)}; not in range: {', '.join(missing_labels)}")
         else:
             print(f"All {len(addresses)} device(s) found.")
 
