@@ -229,11 +229,13 @@ def _build_scan_parser(subparsers) -> None:
             "Scan the BLE environment and report which devices are visible,\n"
             "along with their internal name (if configured), MAC address,\n"
             "Bluetooth advertisement name, and how long they took to appear.\n\n"
-            "Without --all, one or more DEVICE arguments are required so the\n"
-            "scan knows what to look for.\n\n"
-            "With --all, DEVICE is optional: every BLE device found during the\n"
-            "scan is reported, and those matching configured devices are labelled\n"
-            "with their internal name (e.g. T1, T2)."
+            "Without --all: scans for the specified DEVICE(s), or — if none\n"
+            "are given — for all devices in the config file. The scan exits\n"
+            "as soon as all requested devices are found (or times out).\n\n"
+            "With --all: every BLE device found during the full scan duration\n"
+            "is reported; configured devices are labelled with their internal\n"
+            "name (e.g. T1, T2). DEVICE arguments and the config file are\n"
+            "both optional in this mode."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -270,32 +272,47 @@ async def _run_scan(args, cfg) -> int:
         else defaults.get("scan_timeout", 20)
     )
 
-    # Resolve requested devices from positional args
-    selected: dict[str, dict] = {}
-    unknown: list[str] = []
-    for arg in (args.devices or []):
-        key, device = resolve_device(devices_cfg, arg)
-        if device:
-            selected[key] = device
-        else:
-            unknown.append(arg)
+    # Determine which devices to explicitly scan for:
+    #   device args given  → use those
+    #   no args, no --all  → use all configured devices (early-exit scan)
+    #   --all, no args     → no explicit targets (full-duration scan)
+    if args.devices:
+        selected: dict[str, dict] = {}
+        unknown: list[str] = []
+        for arg in args.devices:
+            key, device = resolve_device(devices_cfg, arg)
+            if device:
+                selected[key] = device
+            else:
+                unknown.append(arg)
+        if unknown:
+            print(f"Warning: unknown device(s) ignored: {', '.join(unknown)}", file=sys.stderr)
+        if not selected and not args.all:
+            print("Error: no valid devices specified.", file=sys.stderr)
+            return 1
+    elif not args.all:
+        selected = dict(devices_cfg)
+        if not selected:
+            print("Error: no devices in config; specify a DEVICE or use --all.", file=sys.stderr)
+            return 1
+    else:
+        selected = {}
 
-    if unknown:
-        print(f"Warning: unknown device(s) ignored: {', '.join(unknown)}", file=sys.stderr)
+    # Label lookup always covers all config devices so --all mode labels known ones too.
+    known_by_addr = {dev["mac"].upper(): key for key, dev in devices_cfg.items()}
+    suffix_to_key = {mac_to_name_suffix(dev["mac"]): key for key, dev in devices_cfg.items()}
+    target_keys = set(selected.keys())
 
-    if not args.all and not selected:
-        print("Error: specify at least one device or use --all.", file=sys.stderr)
-        return 1
-
-    # Lookup structures for matching scan results to known devices
-    known_by_addr = {dev["mac"].upper(): key for key, dev in selected.items()}
-    suffix_to_key = {mac_to_name_suffix(dev["mac"]): key for key, dev in selected.items()}
-
-    print(f"Scanning for {scan_timeout:.0f}s...")
+    if target_keys:
+        print(f"Scanning for {', '.join(selected)} (timeout {scan_timeout:.0f}s)...")
+    else:
+        print(f"Scanning for {scan_timeout:.0f}s...")
     print()
 
     start = time.monotonic()
-    seen: dict[str, dict] = {}  # address -> {key, bt_name, elapsed}
+    seen: dict[str, dict] = {}
+    found_target_keys: set[str] = set()
+    all_targets_found = asyncio.Event()
 
     def callback(device, _adv_data) -> None:
         addr = device.address.upper()
@@ -306,17 +323,27 @@ async def _run_scan(args, cfg) -> int:
         if key is None and device.name:
             if device.name.startswith("TP357S (") and device.name.endswith(")"):
                 key = suffix_to_key.get(device.name[8:-1])
-        if key is not None or args.all:
+        if args.all or (key is not None and key in target_keys):
             seen[addr] = {"key": key, "bt_name": device.name, "elapsed": elapsed}
+        if key is not None and key in target_keys and key not in found_target_keys:
+            found_target_keys.add(key)
+            if found_target_keys >= target_keys:
+                all_targets_found.set()
 
     async with BleakScanner(callback):
-        await asyncio.sleep(scan_timeout)
+        if args.all:
+            await asyncio.sleep(scan_timeout)
+        else:
+            try:
+                await asyncio.wait_for(all_targets_found.wait(), timeout=scan_timeout)
+            except asyncio.TimeoutError:
+                pass
 
     if not seen:
         print("No devices found.")
         return 0
 
-    # Sort: known devices in config order, then unknown alphabetically by address
+    # Sort: configured devices in config order first, then others alphabetically.
     config_order = list(devices_cfg.keys())
 
     def _sort_key(item):
@@ -341,8 +368,10 @@ async def _run_scan(args, cfg) -> int:
     n_known = sum(1 for _, info in rows if info["key"] is not None)
     n_unknown = len(rows) - n_known
     parts = []
-    if selected:
-        parts.append(f"{n_known}/{len(selected)} configured device(s) found")
+    if target_keys:
+        parts.append(f"{len(found_target_keys)}/{len(target_keys)} configured device(s) found")
+    elif n_known:
+        parts.append(f"{n_known} configured device(s) visible")
     if args.all and n_unknown:
         parts.append(f"{n_unknown} other BLE device(s) visible")
     if parts:
