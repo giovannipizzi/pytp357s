@@ -309,12 +309,22 @@ async def _run_scan(args, cfg) -> int:
         print(f"Scanning for {scan_timeout:.0f}s...")
     print()
 
+    # Fixed column widths: label from config keys, addr covers both MAC (17) and
+    # CoreBluetooth UUID (36), bt_name is a reasonable cap for advertisement names.
+    label_w = max((len(f"[{k}]") for k in devices_cfg), default=4)
+    addr_w = 36
+    name_w = 20
+    print(f"  {'':>{label_w}}  {'Address':<{addr_w}}  {'BT Name':<{name_w}}  {'Time':>6}")
+
     start = time.monotonic()
-    seen: dict[str, dict] = {}
+    seen: set[str] = set()
     found_target_keys: set[str] = set()
+    n_known = 0
+    n_unknown = 0
     all_targets_found = asyncio.Event()
 
     def callback(device, _adv_data) -> None:
+        nonlocal n_known, n_unknown
         addr = device.address.upper()
         if addr in seen:
             return
@@ -324,7 +334,14 @@ async def _run_scan(args, cfg) -> int:
             if device.name.startswith("TP357S (") and device.name.endswith(")"):
                 key = suffix_to_key.get(device.name[8:-1])
         if args.all or (key is not None and key in target_keys):
-            seen[addr] = {"key": key, "bt_name": device.name, "elapsed": elapsed}
+            seen.add(addr)
+            label = f"[{key}]" if key else ""
+            bt_name = device.name or ""
+            print(f"  {label:<{label_w}}  {addr:<{addr_w}}  {bt_name:<{name_w}}  {elapsed:5.1f}s")
+            if key is not None:
+                n_known += 1
+            else:
+                n_unknown += 1
         if key is not None and key in target_keys and key not in found_target_keys:
             found_target_keys.add(key)
             if found_target_keys >= target_keys:
@@ -340,33 +357,10 @@ async def _run_scan(args, cfg) -> int:
                 pass
 
     if not seen:
-        print("No devices found.")
+        print("\nNo devices found.")
         return 0
 
-    # Sort: configured devices in config order first, then others alphabetically.
-    config_order = list(devices_cfg.keys())
-
-    def _sort_key(item):
-        addr, info = item
-        k = info["key"]
-        if k and k in config_order:
-            return (0, config_order.index(k), addr)
-        return (1, 0, addr)
-
-    rows = sorted(seen.items(), key=_sort_key)
-
-    label_w = max((len(f"[{info['key']}]") if info["key"] else 0 for _, info in rows), default=0)
-    addr_w = max(len(addr) for addr, _ in rows)
-    name_w = max((len(info["bt_name"] or "") for _, info in rows), default=0)
-
-    for addr, info in rows:
-        label = f"[{info['key']}]" if info["key"] else ""
-        bt_name = info["bt_name"] or ""
-        print(f"  {label:<{label_w}}  {addr:<{addr_w}}  {bt_name:<{name_w}}  {info['elapsed']:5.1f}s")
-
     print()
-    n_known = sum(1 for _, info in rows if info["key"] is not None)
-    n_unknown = len(rows) - n_known
     parts = []
     if target_keys:
         parts.append(f"{len(found_target_keys)}/{len(target_keys)} configured device(s) found")
