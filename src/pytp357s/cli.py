@@ -277,9 +277,13 @@ async def _run_scan(args, cfg) -> int:
     #   no args, no --all  → use all configured devices (early-exit scan)
     #   --all, no args     → no explicit targets (full-duration scan)
     if args.devices:
+        raw_devices = args.devices
+        if any(d.upper() == "ALL" for d in raw_devices):
+            raw_devices = list(devices_cfg.keys())
+        raw_devices = list(dict.fromkeys(raw_devices))  # deduplicate, preserve order
         selected: dict[str, dict] = {}
         unknown: list[str] = []
-        for arg in args.devices:
+        for arg in raw_devices:
             key, device = resolve_device(devices_cfg, arg)
             if device:
                 selected[key] = device
