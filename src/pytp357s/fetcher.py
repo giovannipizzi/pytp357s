@@ -291,7 +291,7 @@ async def process_devices(
     scan_timeout: float,
     parallelism: int,
     force: bool,
-    interval_minutes: int,
+    max_fetch_count: int,
     verbose: bool = False,
     debug_overlap: bool = False,
 ) -> dict[str, FetchResult]:
@@ -340,7 +340,7 @@ async def process_devices(
         count=count,
         last_ts_map=last_ts_map,
         overlap=overlap,
-        interval_minutes=interval_minutes,
+        max_fetch_count=max_fetch_count,
         parallelism=parallelism,
         timeout=timeout,
         scan_timeout=scan_timeout,
@@ -361,8 +361,24 @@ async def process_devices(
             continue
 
         readings, fetch_time = raw
-        timestamped = protocol.assign_timestamps(readings, fetch_time, interval_minutes)
-        fetch_results[key] = _post_process_history(
+
+        if count is None and len(readings) == max_fetch_count:
+            msg = (
+                f"Fetched exactly {max_fetch_count} records, which is the current "
+                f"max-fetch-count limit — older records may have been truncated. "
+                f"Increase max_fetch_count in devices.yaml (or pass --count N) "
+                f"and re-fetch."
+            )
+            if not force:
+                fetch_results[key] = FetchResult(key=key, status="error", message=msg)
+                continue
+            # --force: warn but proceed
+            cap_warning = msg
+        else:
+            cap_warning = None
+
+        timestamped = protocol.assign_timestamps(readings, fetch_time, interval_minutes=1)
+        result = _post_process_history(
             key=key,
             timestamped=timestamped,
             new_only_from=new_only_from_map[key],
@@ -370,8 +386,17 @@ async def process_devices(
             incremental=incremental,
             force=force,
             overlap=overlap,
-            interval_minutes=interval_minutes,
+            interval_minutes=1,
             debug_overlap=debug_overlap,
         )
+        if cap_warning and result.status == "ok":
+            result = FetchResult(
+                key=key,
+                status="warning",
+                message=f"{result.message} — WARNING: {cap_warning}",
+                data=result.data,
+                extra=result.extra,
+            )
+        fetch_results[key] = result
 
     return fetch_results

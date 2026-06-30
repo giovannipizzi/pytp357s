@@ -12,12 +12,11 @@
 
 # Global defaults. All of these can be overridden per-command via CLI flags.
 defaults:
-  max_count: 20000        # records to request on a full fetch (16-bit max 65535)
+  max_fetch_count: 20000   # max records to request when no prior data exists (16-bit max 65535)
   overlap: 15              # records to re-fetch and verify in incremental mode
   timeout: 120             # BLE response timeout in seconds (waiting for data after connect)
   scan_timeout: 20         # BLE device discovery timeout in seconds (macOS needs ~20s)
   parallel: 2              # max simultaneous BLE connections (1 = serial)
-  interval_minutes: 1      # recording interval of the devices (currently fixed at 1 min)
 
 devices:
   S1:

@@ -132,7 +132,7 @@ async def _run_fetch(args, cfg) -> int:
     timeout = args.timeout if args.timeout is not None else defaults["timeout"]
     scan_timeout = args.scan_timeout if args.scan_timeout is not None else defaults["scan_timeout"]
     parallel = args.parallel if args.parallel is not None else defaults["parallel"]
-    interval_minutes = defaults["interval_minutes"]
+    max_fetch_count = defaults["max_fetch_count"]
 
     if args.incremental and not args.db:
         print("Error: --incremental requires --db.", file=sys.stderr)
@@ -180,7 +180,7 @@ async def _run_fetch(args, cfg) -> int:
         scan_timeout=scan_timeout,
         parallelism=parallelism,
         force=args.force,
-        interval_minutes=interval_minutes,
+        max_fetch_count=max_fetch_count,
         verbose=args.verbose,
         debug_overlap=args.debug_overlap,
     )

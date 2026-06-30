@@ -42,12 +42,11 @@ cp examples/devices.example.yaml devices.yaml
 
 ```yaml
 defaults:
-  max_count: 20000
+  max_fetch_count: 20000   # max records to request when no prior data exists
   overlap: 15
   timeout: 120
   scan_timeout: 20        # BLE discovery timeout (macOS needs ~20s)
   parallel: 2
-  interval_minutes: 1 # do not change
 
 devices:
   S1:
@@ -186,13 +185,13 @@ results = asyncio.run(process_devices(
     live=False,
     db_path=None,
     incremental=False,
-    count=20000,
+    count=None,
     overlap=0,
     timeout=120,
     scan_timeout=20,
     parallelism=1,
     force=False,
-    interval_minutes=1,
+    max_fetch_count=20000,
 ))
 timestamped = results["S1"].data  # list of (datetime, temp, hum)
 

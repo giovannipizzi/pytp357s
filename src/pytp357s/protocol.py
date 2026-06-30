@@ -223,7 +223,7 @@ async def ble_fetch_history(
     count: int | None,
     last_ts_map: dict[str, datetime.datetime | None],
     overlap: int,
-    interval_minutes: int,
+    max_fetch_count: int,
     parallelism: int = 1,
     timeout: float = 120,
     scan_timeout: float = 20,
@@ -243,7 +243,7 @@ async def ble_fetch_history(
         count: explicit record count override (None = derive from last_ts).
         last_ts_map: per-device last stored timestamp, keyed by uppercase address.
         overlap: extra records beyond elapsed time, for overlap verification.
-        interval_minutes: device recording interval.
+        max_fetch_count: max records to request when no prior timestamp is known.
         parallelism: max simultaneous BLE connections.
         timeout: per-device BLE response timeout in seconds.
         scan_timeout: BLE discovery timeout in seconds.
@@ -307,13 +307,14 @@ async def ble_fetch_history(
                     now = datetime.datetime.now()
                     fetch_time = now.replace(second=0, microsecond=0)
                     last_ts = last_ts_map.get(address)
+                    interval_minutes = 1
                     if count is not None:
                         fetch_count = count
                     elif last_ts is not None:
                         elapsed = max(1, int((fetch_time - last_ts).total_seconds() / 60 / interval_minutes))
                         fetch_count = elapsed + overlap
                     else:
-                        fetch_count = 20000
+                        fetch_count = max_fetch_count
 
                     if verbose:
                         print(f"{prefix}Requesting {fetch_count} records...")

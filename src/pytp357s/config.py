@@ -25,12 +25,11 @@ USER_CONFIG_PATH = USER_CONFIG_DIR / "devices.yaml"
 
 # Built-in defaults, used if not present in the YAML's `defaults:` section.
 BUILTIN_DEFAULTS = {
-    "max_count": 20000,
+    "max_fetch_count": 20000,
     "overlap": 15,
     "timeout": 120,
     "scan_timeout": 20,
     "parallel": 2,
-    "interval_minutes": 1,
 }
 
 

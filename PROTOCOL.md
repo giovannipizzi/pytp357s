@@ -206,9 +206,9 @@ But it is unclear if the actual storage is so long, or it is shorter.
 Checking on a long-running device and fetching data from scratch will
 allow to confirm this.
 Note that internally, by default, only 20000 entries at most are fetched
-(configurable under `max_count` in the YAML configuration file), so
-a bit less than 2 weeks. Change this value to fetch for longer times,
-or to test the buffer size.
+on a first fetch (configurable under `max_fetch_count` in the YAML
+configuration file), so a bit less than 2 weeks. Increase this value to
+fetch further back, or to test the actual buffer size.
 
 ### Recording interval
 
